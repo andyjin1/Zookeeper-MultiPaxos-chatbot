@@ -5,14 +5,19 @@ import socket
 import json
 import time
 
+import threading
+import socket
+import json
+import time
+
 class NetworkServer:
     def __init__(self, host, port, nodes_info):
         self.host = host
         self.port = port
         self.nodes_info = nodes_info
-        self.node_sockets = {}  # node_id: socket
-        self.node_addresses = {}  # node_id: (host, port)
-        self.links_status = {}  # (node_id1, node_id2): True/False (link up/down)
+        self.node_sockets = {}
+        self.node_addresses = {}
+        self.links_status = {}
         self.active = True
         self.lock = threading.Lock()
         self.start_server()
@@ -32,47 +37,61 @@ class NetworkServer:
 
     def handle_node_connection(self, conn):
         try:
-            # First message from node is its node_id
-            data = conn.recv(4096)
-            if data:
-                message = json.loads(data.decode())
-                node_id = message.get('node_id')
-                if node_id and node_id in self.nodes_info:
-                    with self.lock:
-                        self.node_sockets[node_id] = conn
-                        self.node_addresses[node_id] = self.nodes_info[node_id]
-                        # Initialize links as up
-                        for other_node_id in self.nodes_info:
-                            if other_node_id != node_id:
-                                self.links_status[(node_id, other_node_id)] = True
-                                self.links_status[(other_node_id, node_id)] = True
-                    print(f"Node {node_id} connected to Network Server.")
-                    # Start listening for messages from this node
-                    self.listen_to_node(node_id, conn)
+            node_id = self.read_delimited_message(conn)
+            if node_id and node_id in self.nodes_info:
+                with self.lock:
+                    self.node_sockets[node_id] = conn
+                    self.node_addresses[node_id] = self.nodes_info[node_id]
+                    # Initialize links as up
+                    for other_node_id in self.nodes_info:
+                        if other_node_id != node_id:
+                            self.links_status[(node_id, other_node_id)] = True
+                            self.links_status[(other_node_id, node_id)] = True
+                print(f"Node {node_id} connected to Network Server.")
+                self.listen_to_node(node_id, conn)
+            else:
+                conn.close()
         except Exception as e:
             print(f"Error handling node connection: {e}")
 
+    def read_delimited_message(self, conn):
+        buffer = b''
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return None
+            buffer += chunk
+            parts = buffer.split(b'\0')
+            # We only expect one initial message for node_id
+            if len(parts) > 1:
+                msg_bytes = parts[0]
+                buffer = parts[-1]  # leftover (if any)
+                message = json.loads(msg_bytes.decode())
+                return message.get('node_id')
+
     def listen_to_node(self, node_id, conn):
+        buffer = b''
         while self.active:
             try:
-                data = conn.recv(4096)
-                if data:
-                    message = json.loads(data.decode())
-                    # The message should have 'to' field indicating the recipient
-                    recipient_id = message.get('to')
-                    if recipient_id and recipient_id in self.node_sockets:
-                        # Check if link between sender and recipient is up
-                        with self.lock:
-                            link_up = self.links_status.get((node_id, recipient_id), True)
-                        if link_up:
-                            # Delay the message by 3 seconds
-                            threading.Thread(target=self.forward_message_with_delay, args=(recipient_id, message), daemon=True).start()
-                        else:
-                            print(f"Link between {node_id} and {recipient_id} is down. Message not forwarded.")
-                    else:
-                        print(f"Recipient {recipient_id} not connected.")
-                else:
+                chunk = conn.recv(4096)
+                if not chunk:
                     break
+                buffer += chunk
+                parts = buffer.split(b'\0')
+                for msg_bytes in parts[:-1]:
+                    if msg_bytes.strip():
+                        message = json.loads(msg_bytes.decode())
+                        recipient_id = message.get('to')
+                        if recipient_id and recipient_id in self.node_sockets:
+                            with self.lock:
+                                link_up = self.links_status.get((node_id, recipient_id), True)
+                            if link_up:
+                                threading.Thread(target=self.forward_message_with_delay, args=(recipient_id, message), daemon=True).start()
+                            else:
+                                print(f"Link between {node_id} and {recipient_id} is down. Message not forwarded.")
+                        else:
+                            print(f"Recipient {recipient_id} not connected.")
+                buffer = parts[-1]
             except Exception as e:
                 print(f"Error listening to node {node_id}: {e}")
                 break
@@ -83,12 +102,13 @@ class NetworkServer:
         print(f"Node {node_id} disconnected.")
 
     def forward_message_with_delay(self, recipient_id, message):
-        time.sleep(3)  # 3-second delay
+        time.sleep(3)
         with self.lock:
             recipient_conn = self.node_sockets.get(recipient_id)
         if recipient_conn:
             try:
-                recipient_conn.sendall(json.dumps(message).encode())
+                data = json.dumps(message).encode() + b'\0'
+                recipient_conn.sendall(data)
             except Exception as e:
                 print(f"Error forwarding message to {recipient_id}: {e}")
         else:
@@ -142,6 +162,10 @@ class NetworkServer:
                 print(f"Node {node_id} crashed.")
             else:
                 print(f"Node {node_id} not connected.")
+
+    def stop(self):
+        self.active = False
+        print("Network Server stopped.")
 
 if __name__ == "__main__":
     from config import NODES_INFO, NETWORK_SERVER_INFO

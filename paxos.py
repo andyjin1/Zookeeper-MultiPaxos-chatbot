@@ -1,4 +1,6 @@
 # paxos.py
+import time
+
 
 def server_name(node_id):
     # Convert 'node3' -> 'Server 3'
@@ -30,7 +32,6 @@ class Paxos:
         self.accepted_responses = {}
 
         self.proposed_operation = None
-
         self.leader = None
         self.is_leader = False
 
@@ -55,7 +56,8 @@ class Paxos:
         incoming_ballot = message['ballot_num']
         seq_num, pid_str, incoming_op_num = incoming_ballot
         sender = message['from']
-
+        seq, pid_str, _ = self.ballot_num
+        self.ballot_num = (seq_num, self.node_id, self.num_operations_applied)
         print(f"Received PREPARE {format_ballot_num(incoming_ballot)} from {server_name(sender)}")
         # Check if we applied more ops than incoming_op_num
         if self.num_operations_applied > incoming_op_num:
@@ -88,7 +90,7 @@ class Paxos:
         print(f"Received PROMISE {format_ballot_num(incoming_ballot)} from {server_name(sender)}")
 
         self.prepare_responses[sender] = message
-        if len(self.prepare_responses) + 1 >= (len(self.nodes_info) // 2) + 1:
+        if len(self.prepare_responses) >= (len(self.nodes_info) // 2) + 1:
             if not self.is_leader:
                 self.leader = self.node_id
                 self.is_leader = True

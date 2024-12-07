@@ -61,6 +61,7 @@ class Node:
         else:
             print(f"Unknown message type received: {msg_type}")
 
+
     def handle_forward(self, message):
         operation = message['operation']
         if self.paxos.is_leader:
@@ -300,6 +301,10 @@ class Node:
         while self.active:
             command = input("> ")
             self.process_user_command(command)
+
+    def start_user_interface(self):
+        threading.Thread(target=self.user_interface, args=(), daemon=True).start()
+
 
     # In node.py, modify log_received_msg to skip detailed logging of protocol messages:
 
