@@ -244,7 +244,7 @@ class Node:
     def handle_new_operation(self, operation):
         if self.paxos.is_leader:
             # If we are already leader, submit directly
-            print(f"Submitting operation as leader: {operation}")
+      #     print(f"Submitting operation as leader: {operation}")
             self.paxos.submit_operation(operation)
         else:
             # Not leader

@@ -1,5 +1,54 @@
 # paxos.py
+import threading
 import time
+
+
+def ballot_greater(b1, b2):
+    # b1 and b2 are tuples: (seq, pid_str, op_num)
+    seq1, pid_str1, op_num1 = b1
+    seq2, pid_str2, op_num2 = b2
+
+    # Convert pid_str to int
+    pid1 = int(''.join(ch for ch in pid_str1 if ch.isdigit()))
+    pid2 = int(''.join(ch for ch in pid_str2 if ch.isdigit()))
+
+    if seq1 != seq2:
+        return seq1 > seq2
+    if pid1 != pid2:
+        return pid1 > pid2
+    return op_num1 > op_num2
+
+def compare_ballots(b1, b2):
+    """
+    Compare two ballot numbers b1 and b2.
+    Works for both tuples and lists.
+    Returns:
+        -1 if b1 < b2
+         0 if b1 == b2
+         1 if b1 > b2
+    """
+    # Extract values
+    seq1, pid_str1, op_num1 = b1
+    seq2, pid_str2, op_num2 = b2
+
+    # Convert pid_str to int for comparison
+    pid1 = int(''.join(ch for ch in pid_str1 if ch.isdigit()))
+    pid2 = int(''.join(ch for ch in pid_str2 if ch.isdigit()))
+
+    # Compare sequence numbers
+    if seq1 != seq2:
+        return -1 if seq1 < seq2 else 1
+
+    # Compare proposer IDs
+    if pid1 != pid2:
+        return -1 if pid1 < pid2 else 1
+
+    # Compare operation numbers
+    if op_num1 != op_num2:
+        return -1 if op_num1 < op_num2 else 1
+
+    # Ballots are equal
+    return 0
 
 
 def server_name(node_id):
@@ -38,6 +87,8 @@ class Paxos:
         self.operation_queue = []
         self.num_operations_applied = 0  # number of decided ops applied locally
 
+
+        self.decided_operations = set()
     def start_election(self):
         # Start a new election by incrementing seq_num in the ballot
         self.ballot_num = (self.ballot_num[0] + 1, self.node_id, self.num_operations_applied)
@@ -56,16 +107,18 @@ class Paxos:
         incoming_ballot = message['ballot_num']
         seq_num, pid_str, incoming_op_num = incoming_ballot
         sender = message['from']
-        seq, pid_str, _ = self.ballot_num
-        self.ballot_num = (seq_num, self.node_id, self.num_operations_applied)
+        # Remove these lines that update self.ballot_num
+        # seq, pid_str, _ = self.ballot_num
+        # self.ballot_num = (seq_num, self.node_id, self.num_operations_applied)
+
         print(f"Received PREPARE {format_ballot_num(incoming_ballot)} from {server_name(sender)}")
-        # Check if we applied more ops than incoming_op_num
+
         if self.num_operations_applied > incoming_op_num:
-            print(f"Ignoring PREPARE {format_ballot_num(incoming_ballot)} from {server_name(sender)}; local ops ({self.num_operations_applied}) > op_num ({incoming_op_num})")
+            print(
+                f"Ignoring PREPARE {format_ballot_num(incoming_ballot)} from {server_name(sender)}; local ops ({self.num_operations_applied}) > op_num ({incoming_op_num})")
             return
 
-        # Only promise if incoming_ballot > promised_ballot_num
-        if self.promised_ballot_num is None or incoming_ballot > self.promised_ballot_num:
+        if self.promised_ballot_num is None or incoming_ballot >= self.promised_ballot_num:
             self.promised_ballot_num = incoming_ballot
             response = {
                 'type': 'PROMISE',
@@ -76,13 +129,14 @@ class Paxos:
                 'accepted_value': self.accepted_value
             }
             if self.accepted_value:
-                print(f"Sending PROMISE {format_ballot_num(incoming_ballot)} with previously accepted value to {server_name(sender)}")
+                print(
+                    f"Sending PROMISE {format_ballot_num(incoming_ballot)} with previously accepted value to {server_name(sender)}")
             else:
                 print(f"Sending PROMISE {format_ballot_num(incoming_ballot)} to {server_name(sender)}")
             self.network.send_message(sender, response)
         else:
-            print(f"Ignoring PREPARE {format_ballot_num(incoming_ballot)} from {server_name(sender)}; already promised {format_ballot_num(self.promised_ballot_num)}")
-    # paxos.py (Only small logic check)
+            print(
+                f"Ignoring PREPARE {format_ballot_num(incoming_ballot)} from {server_name(sender)}; already promised {format_ballot_num(self.promised_ballot_num)}")
 
     def handle_promise(self, message):
         sender = message['from']
@@ -90,7 +144,7 @@ class Paxos:
         print(f"Received PROMISE {format_ballot_num(incoming_ballot)} from {server_name(sender)}")
 
         self.prepare_responses[sender] = message
-        if len(self.prepare_responses) >= (len(self.nodes_info) // 2) + 1:
+        if len(self.prepare_responses) + 1 >= (len(self.nodes_info) // 2) + 1:
             if not self.is_leader:
                 self.leader = self.node_id
                 self.is_leader = True
@@ -108,8 +162,21 @@ class Paxos:
 
         print(f"Received ACCEPT {format_ballot_num(incoming_ballot)} from {server_name(sender)} for {operation}")
 
+        # Do not update self.ballot_num here either
+        # seq, pid_str, _ = self.ballot_num
+        # self.ballot_num = (seq_num, self.node_id, self.num_operations_applied)
+        if self.is_leader and compare_ballots(incoming_ballot, self.ballot_num) > 0:
+            print(
+                f"{server_name(self.node_id)} invalidates leadership. Higher ballot {format_ballot_num(incoming_ballot)} observed.")
+            self.is_leader = False
+            self.leader = sender  # Update the known leader
+
         if self.num_operations_applied > incoming_op_num:
-            print(f"Ignoring ACCEPT {format_ballot_num(incoming_ballot)} from {server_name(sender)}; local ops ({self.num_operations_applied}) > op_num ({incoming_op_num})")
+            print(
+                f"Ignoring ACCEPT {format_ballot_num(incoming_ballot)} from {server_name(sender)}; local ops ({self.num_operations_applied}) > op_num ({incoming_op_num})")
+            return
+        if compare_ballots(incoming_ballot, self.ballot_num) < 0:
+            print("Ignoring ACCEPT; incoming ballot less than current ballot.")
             return
 
         if self.promised_ballot_num is None or incoming_ballot >= self.promised_ballot_num:
@@ -126,7 +193,8 @@ class Paxos:
             print(f"Sending ACCEPTED {format_ballot_num(incoming_ballot)} {operation} to {server_name(sender)}")
             self.network.send_message(sender, response)
         else:
-            print(f"Ignoring ACCEPT {format_ballot_num(incoming_ballot)} from {server_name(sender)}; already promised {format_ballot_num(self.promised_ballot_num)}")
+            print(
+                f"Ignoring ACCEPT {format_ballot_num(incoming_ballot)} from {server_name(sender)}; already promised {format_ballot_num(self.promised_ballot_num)}")
 
     def handle_accepted(self, message):
         sender = message['from']
@@ -139,20 +207,32 @@ class Paxos:
             return
 
         self.accepted_responses[sender] = message
-        if len(self.accepted_responses) >= (len(self.nodes_info) // 2) + 1:
-            decide_message = {
-                'type': 'DECIDE',
-                'from': self.node_id,
-                'value': self.proposed_operation,
-                'ballot_num': self.ballot_num
-            }
-            print(f"Sending DECIDE {format_ballot_num(self.ballot_num)} for value {self.proposed_operation} to ALL")
-            self.network.broadcast_message(decide_message)
-            self.apply_decide(decide_message)
+        if len(self.accepted_responses) + 1 >= (len(self.nodes_info) // 2) + 1:
+            # Use the stable key
+            if hasattr(self, 'current_op_key') and self.current_op_key not in self.decided_operations:
+                self.decided_operations.add(self.current_op_key)
+                decide_message = {
+                    'type': 'DECIDE',
+                    'from': self.node_id,
+                    'value': self.proposed_operation,
+                    'ballot_num': self.ballot_num
+                }
+                print(f"Sending DECIDE {format_ballot_num(self.ballot_num)} for value {self.proposed_operation} to ALL")
+                self.network.broadcast_message(decide_message)
+                self.apply_decide(decide_message)
+            else:
+                print(f"Operation {self.proposed_operation} already decided; not sending DECIDE.")
 
     def handle_decide(self, message):
-        print(f"Received DECIDE {format_ballot_num(message['ballot_num'])} from {message['from']} for value {message['value']}")
+        print(
+            f"Received DECIDE {format_ballot_num(message['ballot_num'])} from {message['from']} for value {message['value']}")
         self.apply_decide(message)
+
+        # Update leader information
+        self.leader = message['from']
+        if self.is_leader and self.leader != self.node_id:
+            print(f"{server_name(self.node_id)} invalidates leadership. Leader is now {server_name(self.leader)}.")
+            self.is_leader = False
 
     def apply_decide(self, message):
         operation = message['value']
@@ -180,9 +260,18 @@ class Paxos:
             if len(self.operation_queue) == 1:
                 self.process_next_operation()
         else:
-            # Should not happen if logic in node is correct.
-            # The node class handles forwarding if not leader.
-            print(f"Cannot submit operation directly; not leader.")
+            # Forward the operation to the current leader
+            if self.leader:
+                print(f"Forwarding operation to leader {server_name(self.leader)}: {operation}")
+                message = {
+                    'type': 'FORWARD',
+                    'from': self.node_id,
+                    'to': self.leader,
+                    'value': operation
+                }
+                self.network.send_message(self.leader, message)
+            else:
+                print("Cannot submit operation; no known leader.")
 
     def process_next_operation(self):
         if not self.operation_queue:
@@ -190,7 +279,9 @@ class Paxos:
             return
 
         self.proposed_operation = self.operation_queue[0]
-        # Update ballot_num op_num with current num_operations_applied
+        # Create a stable key for this operation
+        self.current_op_key = tuple(sorted(self.proposed_operation.items()))
+
         seq, pid_str, _ = self.ballot_num
         self.ballot_num = (seq, self.node_id, self.num_operations_applied)
 
@@ -201,5 +292,7 @@ class Paxos:
             'ballot_num': self.ballot_num,
             'value': self.proposed_operation
         }
-        print(f"Sending ACCEPT {format_ballot_num(self.ballot_num)} {self.proposed_operation} from {server_name(self.node_id)} to ALL")
+        print(
+            f"Sending ACCEPT {format_ballot_num(self.ballot_num)} {self.proposed_operation} from {server_name(self.node_id)} to ALL")
         self.network.broadcast_message(accept_message)
+
