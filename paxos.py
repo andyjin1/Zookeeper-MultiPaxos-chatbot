@@ -89,9 +89,11 @@ class Paxos:
 
 
         self.decided_operations = set()
+
     def start_election(self):
-        # Start a new election by incrementing seq_num in the ballot
-        self.ballot_num = (self.ballot_num[0] + 1, self.node_id, self.num_operations_applied)
+        # Determine the next seq_num to use
+        next_seq_num = max(self.ballot_num[0], self.promised_ballot_num[0] if self.promised_ballot_num else 0) + 1
+        self.ballot_num = (next_seq_num, self.node_id, self.num_operations_applied)
         self.prepare_responses = {}
 
         print(f"{server_name(self.node_id)} starting election.")
@@ -114,8 +116,15 @@ class Paxos:
         print(f"Received PREPARE {format_ballot_num(incoming_ballot)} from {server_name(sender)}")
 
         if self.num_operations_applied > incoming_op_num:
-            print(
-                f"Ignoring PREPARE {format_ballot_num(incoming_ballot)} from {server_name(sender)}; local ops ({self.num_operations_applied}) > op_num ({incoming_op_num})")
+            print(f"{server_name(self.node_id)} is behind. Sending STATUS_REQUEST to {server_name(self.leader)}.")
+            status_request = {
+                'type': 'STATUS_REQUEST',
+                'from': self.node_id,
+                'to': self.leader,
+                'op_num': self.num_operations_applied,
+                'ballot_num': self.ballot_num,  # Include the current ballot number
+            }
+            self.network.send_message(self.leader, status_request)
             return
 
         if self.promised_ballot_num is None or incoming_ballot >= self.promised_ballot_num:
@@ -171,6 +180,17 @@ class Paxos:
             self.is_leader = False
             self.leader = sender  # Update the known leader
 
+            if self.proposed_operation:
+                forward_message = {
+                    'type': 'FORWARD',
+                    'from': self.node_id,
+                    'to': self.leader,
+                    'operation': self.proposed_operation
+                }
+                print(
+                    f"Forwarding invalidated operation to new leader {server_name(self.leader)}: {self.proposed_operation}")
+                self.network.send_message(self.leader, forward_message)
+
         if self.num_operations_applied > incoming_op_num:
             print(
                 f"Ignoring ACCEPT {format_ballot_num(incoming_ballot)} from {server_name(sender)}; local ops ({self.num_operations_applied}) > op_num ({incoming_op_num})")
@@ -220,6 +240,8 @@ class Paxos:
                 print(f"Sending DECIDE {format_ballot_num(self.ballot_num)} for value {self.proposed_operation} to ALL")
                 self.network.broadcast_message(decide_message)
                 self.apply_decide(decide_message)
+                ######CHANGE######
+                #self.decided_operations.add(self.current_op_key)
             else:
                 print(f"Operation {self.proposed_operation} already decided; not sending DECIDE.")
 
@@ -233,6 +255,45 @@ class Paxos:
         if self.is_leader and self.leader != self.node_id:
             print(f"{server_name(self.node_id)} invalidates leadership. Leader is now {server_name(self.leader)}.")
             self.is_leader = False
+
+        # Check if this node is lagging
+        incoming_op_num = message['ballot_num'][2]
+        if incoming_op_num > self.num_operations_applied:
+            print(f"{server_name(self.node_id)} is behind. Sending STATUS_REQUEST to {server_name(self.leader)}.")
+            status_request = {
+                'type': 'STATUS_REQUEST',
+                'from': self.node_id,
+                'to': self.leader,
+                'op_num': self.num_operations_applied,
+                'ballot_num': self.ballot_num,  # Include the current ballot number
+            }
+            self.network.send_message(self.leader, status_request)
+
+    def send_status_request(self, target_node):
+        status_request = {
+            'type': 'STATUS_REQUEST',
+            'from': self.node_id,
+            'to': self.leader,
+            'op_num': self.num_operations_applied,
+            'ballot_num': self.ballot_num,  # Include the current ballot number
+        }
+        self.network.send_message(target_node, status_request)
+
+        # Start a timeout for the response
+        threading.Timer(5.0, self.handle_status_request_timeout, args=(target_node,)).start()
+
+    def handle_status_request_timeout(self, target_node):
+        if target_node == self.leader:
+            print(
+                f"STATUS_REQUEST to leader {server_name(self.leader)} timed out. Trying another node or triggering election.")
+            self.try_alternate_status_update()
+
+    def try_alternate_status_update(self):
+        # Broadcast STATUS_REQUEST to all nodes except self
+        for node_id in self.nodes_info:
+            if node_id != self.node_id:
+                print(f"Broadcasting STATUS_REQUEST to {server_name(node_id)}.")
+                self.send_status_request(node_id)
 
     def apply_decide(self, message):
         operation = message['value']
@@ -292,7 +353,6 @@ class Paxos:
             'ballot_num': self.ballot_num,
             'value': self.proposed_operation
         }
-        print(
-            f"Sending ACCEPT {format_ballot_num(self.ballot_num)} {self.proposed_operation} from {server_name(self.node_id)} to ALL")
+        print(f"Sending ACCEPT {format_ballot_num(self.ballot_num)} {self.proposed_operation} from {server_name(self.node_id)} to ALL")
         self.network.broadcast_message(accept_message)
 

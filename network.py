@@ -53,7 +53,7 @@ class Network:
                             try:
                                 message = json.loads(msg_bytes.decode())
                                 self.message_queue.put(message)
-                                logging.info(f"Received message: {message}")
+                                #logging.info(f"Received message: {message}")
                             except json.JSONDecodeError as e:
                                 logging.error(f"JSON decode error: {e}")
                     # The last part may be incomplete, keep it in buffer
@@ -74,6 +74,8 @@ class Network:
         logging.info(f"Node {self.node_id} disconnected from Network Server.")
 
     def send_message(self, recipient_id, message):
+        if message['type'] in ["STATUS_REQUEST", "STATUS_RESPONSE"]:
+            print(f"Routing {message['type']} to {recipient_id}.")
         message['to'] = recipient_id
         message['from'] = self.node_id
         data = json.dumps(message).encode() + b'\0'
@@ -98,3 +100,10 @@ class Network:
         if self.network_server_socket:
             self.network_server_socket.close()
         print("Network stopped.")
+
+    def restart(self):
+        self.active = True
+        self.connect_to_network_server()
+        threading.Thread(target=self.receive_messages_from_network_server, daemon=True).start()
+        threading.Thread(target=self.process_incoming_messages, daemon=True).start()
+        print("Network restarted.")

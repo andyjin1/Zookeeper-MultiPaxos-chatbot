@@ -1,9 +1,10 @@
 # node.py
-
+import os
+import sys
 import threading
 import time
 from network import Network
-from paxos import Paxos, server_name, format_ballot_num
+from paxos import Paxos, server_name, format_ballot_num, compare_ballots
 from llm_integration import LLMIntegration
 
 FORWARD_TIMEOUT = 10.0
@@ -58,9 +59,62 @@ class Node:
             self.handle_forward(message)
         elif msg_type == 'ACK':
             self.handle_ack(message)
+        elif msg_type == 'STATUS_REQUEST':
+            self.handle_status_request(message)
+        elif msg_type == 'STATUS_RESPONSE':
+            self.handle_status_response(message)
+        elif msg_type == 'STATUS_RESPONSE':
+            self.handle_status_response(message)
+        elif msg_type == 'CRASH':
+            self.handle_crash(message)
+        elif msg_type == 'RECOVER_START':
+            self.recover()
         else:
             print(f"Unknown message type received: {msg_type}")
 
+    def handle_status_request(self, message):
+        sender = message['from']
+        sender_op_num = message['op_num']
+        sender_ballot_num = message.get('ballot_num', (0, self.node_id, 0))  # Default to a safe value if missing
+
+        print(
+            f"Received STATUS_REQUEST from {server_name(sender)} with op_num {sender_op_num} and ballot {format_ballot_num(sender_ballot_num)}.")
+
+        if sender_op_num < self.num_operations_applied:
+            print(f"Sending STATUS_RESPONSE to {server_name(sender)}.")
+            response = {
+                'type': 'STATUS_RESPONSE',
+                'from': self.node_id,
+                'to': sender,
+                'op_num': self.num_operations_applied,
+                'kv_store': self.kv_store,
+                'ballot_num': self.ballot_num,  # Include the current ballot number
+            }
+            self.network.send_message(sender, response)
+        else:
+            print(f"{server_name(sender)} is up-to-date or ahead. No STATUS_RESPONSE sent.")
+
+    def handle_status_response(self, message):
+        sender = message['from']
+        sender_op_num = message['op_num']
+        sender_kv_store = message['kv_store']
+        sender_ballot_num = message['ballot_num']
+
+        print(
+            f"Received STATUS_RESPONSE from {server_name(sender)} with op_num {sender_op_num} and ballot {format_ballot_num(sender_ballot_num)}.")
+
+        # Update state if behind
+        if sender_op_num > self.num_operations_applied:
+            print(f"Updating op_num and kv_store from {server_name(sender)}.")
+            self.kv_store.update(sender_kv_store)
+            self.num_operations_applied = sender_op_num
+
+        # Update ballot number to ensure it's not behind
+        if compare_ballots(sender_ballot_num, self.ballot_num) > 0:
+            print(f"Updating ballot_num to {format_ballot_num(sender_ballot_num)} from {server_name(sender)}.")
+            self.ballot_num = (sender_ballot_num[0], self.node_id, self.num_operations_applied)
+        else:
+            print(f"Current ballot_num {format_ballot_num(self.ballot_num)} is ahead. No update needed.")
 
     def handle_forward(self, message):
         operation = message['operation']
@@ -133,6 +187,12 @@ class Node:
                 args=(context_id, self.kv_store[context_id], originator),
                 daemon=True
             ).start()
+            # Wait for responses with a timeout
+            threading.Thread(
+                target=self.llm_integration.wait_for_responses,
+                args=(context_id, self.present_llm_responses_to_user),
+                daemon=True
+            ).start()
         elif op_type == 'CHOOSE':
             answer = operation['answer']
             if context_id not in self.kv_store:
@@ -147,6 +207,13 @@ class Node:
         for idx, (node_id, resp) in enumerate(responses, start=1):
             print(f"{idx}: (from {node_id}) {resp}")
         print(f"To select an answer, please type at the main prompt: choose {context_id} <response_number>")
+
+    def thread_llm_response(self, context_id, responses):
+        threading.Thread(
+            target=self.present_llm_responses_to_user,
+            args=(context_id, responses),
+            daemon=True
+        ).start()
 
     def process_user_command(self, command):
         def handle_command():
@@ -296,6 +363,70 @@ class Node:
             'operation': operation,
             'timer': timer
         }
+
+    def broadcast_status_request(self):
+        status_request = {
+            'type': 'STATUS_REQUEST',
+            'from': self.node_id,
+            'num_operations_applied': self.paxos.num_operations_applied,
+            'ballot_num': self.paxos.ballot_num
+        }
+        print(f"Broadcasting STATUS_REQUEST from {server_name(self.node_id)}.")
+        self.network.broadcast_message(status_request)
+
+    def handle_status_request(self, message):
+        status_response = {
+            'type': 'STATUS_RESPONSE',
+            'from': self.node_id,
+            'num_operations_applied': self.paxos.num_operations_applied,
+            'log': self.kv_store,  # Assuming kv_store holds applied operations
+            'leader': self.paxos.leader
+        }
+        print(f"Sending STATUS_RESPONSE to {server_name(message['from'])}.")
+        self.network.send_message(message['from'], status_response)
+
+    def handle_status_response(self, message):
+        sender_op_num = message['num_operations_applied']
+        state = message['log']
+        if sender_op_num > self.paxos.num_operations_applied:
+            print(f"Updating state from {server_name(message['from'])} with op_num {sender_op_num}.")
+            self.kv_store.update(state)
+            self.paxos.num_operations_applied = sender_op_num
+        else:
+            print(f"Received state from {server_name(message['from'])} but no update needed.")
+        if message.get('leader'):
+            self.paxos.leader = message['leader']
+
+    def recover(self):
+        print(f"{server_name(self.node_id)} recovering...")
+        self.active = True
+        self.paxos = Paxos(
+            self.node_id,
+            self.nodes_info,
+            self.network,
+            self.apply_operation,
+            self.on_leader_elected
+        )
+        self.kv_store = {}
+        self.pending_operations = []
+        self.leader = None
+
+        # Restart the network listener
+        self.network.restart()
+        print(f"{server_name(self.node_id)} has recovered and is ready.")
+
+    def start_network_listener(self):
+        print(f"{server_name(self.node_id)} starting network listener...")
+        self.network = Network(self.node_id, self.nodes_info, self.network.network_server_info, self.handle_message)
+        print(f"{server_name(self.node_id)} is now listening for connections.")
+
+    def handle_crash(self, message):
+        self.crash()
+
+    def crash(self):
+        print(f"{server_name(self.node_id)} crashing...")
+        self.network.stop()
+        os._exit(0)  # Force exit in child process
 
     def user_interface(self):
         while self.active:

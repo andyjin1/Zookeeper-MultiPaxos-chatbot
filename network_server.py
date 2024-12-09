@@ -102,17 +102,26 @@ class NetworkServer:
         print(f"Node {node_id} disconnected.")
 
     def forward_message_with_delay(self, recipient_id, message):
-        time.sleep(3)
+        sender_id = message['from']
+        time.sleep(3)  # The existing delay
+
+        # After waiting, re-check that the recipient is still connected and the link is still up
         with self.lock:
             recipient_conn = self.node_sockets.get(recipient_id)
-        if recipient_conn:
+            link_up = self.links_status.get((sender_id, recipient_id), True)
+
+        if recipient_conn and link_up:
             try:
                 data = json.dumps(message).encode() + b'\0'
                 recipient_conn.sendall(data)
             except Exception as e:
                 print(f"Error forwarding message to {recipient_id}: {e}")
         else:
-            print(f"Recipient {recipient_id} not connected.")
+            # If either the recipient is no longer connected or link is down, do not send the message
+            if not recipient_conn:
+                print(f"Recipient {recipient_id} not connected after delay. Message not forwarded.")
+            if not link_up:
+                print(f"Link between {sender_id} and {recipient_id} is down after delay. Message not forwarded.")
 
     def command_interface(self):
         print("Network Server command interface started.")
@@ -120,6 +129,7 @@ class NetworkServer:
         print("fail_link <node1_id> <node2_id>")
         print("fix_link <node1_id> <node2_id>")
         print("crash_node <node_id>")
+        print("recover_node <node_id>")
         print("help")
         while self.active:
             command = input("NetworkServer> ").strip()
@@ -132,11 +142,14 @@ class NetworkServer:
                 self.fix_link(parts[1], parts[2])
             elif parts[0] == 'crash_node' and len(parts) == 2:
                 self.crash_node(parts[1])
+            elif parts[0] == 'recover_node' and len(parts) == 2:
+                self.recover_node(parts[1])
             elif parts[0] == 'help':
                 print("Commands:")
                 print("fail_link <node1_id> <node2_id>")
                 print("fix_link <node1_id> <node2_id>")
                 print("crash_node <node_id>")
+                print("recover_node <node_id>")
                 print("help")
             else:
                 print("Unknown command. Type 'help' for available commands.")
@@ -157,11 +170,94 @@ class NetworkServer:
         with self.lock:
             conn = self.node_sockets.get(node_id)
             if conn:
-                conn.close()
-                del self.node_sockets[node_id]
-                print(f"Node {node_id} crashed.")
+                try:
+                    crash_message = {
+                        'type': 'CRASH',
+                        'from': 'network_server',
+                        'to': node_id
+                    }
+                    conn.sendall((json.dumps(crash_message) + '\0').encode())
+                    print(f"Sent CRASH message to node {node_id}.")
+                except Exception as e:
+                    print(f"Error sending CRASH message to node {node_id}: {e}")
+                finally:
+                    # Properly close the socket and remove from the active nodes
+                    conn.close()
+                    self.node_sockets[node_id] = None
+                    print(f"Node {node_id} disconnected after crash.")
             else:
                 print(f"Node {node_id} not connected.")
+
+    def recover_node(self, node_id):
+        with self.lock:
+            if node_id in self.node_addresses:
+                node_address = self.node_addresses[node_id]
+                try:
+                    print(f"Attempting to recover node {node_id} at address {node_address}")
+
+                    # Send a RECOVER_START message to signal the node to restart itself
+                    if node_id in self.node_sockets:
+                        conn = self.node_sockets[node_id]
+                        recovery_start_message = {
+                            "type": "RECOVER_START",
+                            "from": "network_server",
+                            "to": node_id
+                        }
+                        conn.sendall((json.dumps(recovery_start_message) + '\0').encode())
+                        print(f"Sent RECOVER_START message to node {node_id}.")
+
+                    # Wait for the node to restart and listen for connections
+                    time.sleep(3)  # Allow time for the node to reinitialize its listener
+
+                    node_info = self.node_addresses[node_id]
+                    node_address_tuple = (node_info['host'], node_info['port'])
+                    # Attempt to reconnect
+                    conn = socket.create_connection(node_address_tuple)
+                    self.node_sockets[node_id] = conn
+                    print(f"Node {node_id} recovered and reconnected to Network Server.")
+
+                    # Send the final RECOVERED message
+                    recovery_message = {
+                        "type": "RECOVERED",
+                        "from": "network_server",
+                        "to": node_id
+                    }
+                    conn.sendall((json.dumps(recovery_message) + '\0').encode())
+                    print(f"Sent RECOVERED message to node {node_id}.")
+                except ConnectionRefusedError:
+                    print(f"Node {node_id} is not actively listening. Recovery failed.")
+                except Exception as e:
+                    print(f"Unexpected error during node recovery: {e}")
+            else:
+                print(f"Node {node_id} is not in node_addresses. Cannot recover.")
+
+    def restart_network_socket(self):
+        # Restart the server socket if it was paused
+        try:
+            self.network_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.network_server_socket.bind((self.host, self.port))
+            self.network_server_socket.listen()
+            self.active = True
+            print("Network socket restarted and ready to accept connections.")
+        except Exception as e:
+            print(f"Error restarting network server socket: {e}")
+
+    def notify_broadcast_status(self, node_id):
+        with self.lock:
+            conn = self.node_sockets.get(node_id)
+            if conn:
+                try:
+                    broadcast_request = {
+                        'type': 'BROADCAST_STATUS',
+                        'from': 'network_server',
+                        'to': node_id
+                    }
+                    conn.sendall((json.dumps(broadcast_request) + '\0').encode())
+                    print(f"Sent BROADCAST_STATUS message to {node_id}.")
+                except Exception as e:
+                    print(f"Error notifying node {node_id} to broadcast status: {e}")
+            else:
+                print(f"Node {node_id} is not connected to the network.")
 
     def stop(self):
         self.active = False

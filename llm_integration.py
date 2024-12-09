@@ -1,6 +1,5 @@
-# llm_integration.py
-
 import threading
+import time
 from config import API_KEY, MODEL_NAME
 
 try:
@@ -17,6 +16,7 @@ class LLMIntegration:
         self.lock = threading.Lock()
         self.llm_responses = {}  # Stores LLM responses per context
         self.originators = {}  # Tracks originator nodes per context
+        self.timeout = 10  # Timeout in seconds
 
     def query_llm_and_send_response(self, context_id, context_text, originator_node_id):
         prompt_for_answer = "\nAnswer: "
@@ -36,18 +36,48 @@ class LLMIntegration:
     def handle_llm_response(self, message, present_responses_callback):
         context_id = message['context_id']
         llm_response = message['llm_response']
+        sender = message['from']
+
         with self.lock:
             if context_id not in self.llm_responses:
                 self.llm_responses[context_id] = []
-            self.llm_responses[context_id].append((message['from'], llm_response))
-            # Check if responses from all nodes are received
-            if len(self.llm_responses[context_id]) >= len(self.network.nodes_info):
-                # Present options to the user
-                responses = self.llm_responses[context_id]
-                present_responses_callback(context_id, responses)
-                # Clear stored responses
-                del self.llm_responses[context_id]
-                del self.originators[context_id]
+            self.llm_responses[context_id].append((sender, llm_response))
+
+    # def wait_for_responses(self, context_id, present_responses_callback):
+    #     start_time = time.time()
+    #     while time.time() - start_time < self.timeout:
+    #         time.sleep(0.5)  # Check responses periodically
+    #         with self.lock:
+    #             if len(self.llm_responses.get(context_id, [])) >= (len(self.network.nodes_info) // 2) + 1:
+    #                 break  # Majority quorum reached
+    #
+    #     # After timeout or quorum reached
+    #     with self.lock:
+    #         responses = self.llm_responses.pop(context_id, [])
+    #     if responses:
+    #         print(f"LLM responses received for context {context_id}: {responses}")
+    #         present_responses_callback(context_id, responses)
+    #     else:
+    #         print(f"No responses received for context {context_id} within timeout.")
+
+    def wait_for_responses(self, context_id, present_responses_callback):
+        start_time = time.time()
+        while time.time() - start_time < self.timeout:
+            time.sleep(1)  # Check every 0.5 seconds
+            # Note: We do NOT break if a majority is reached.
+            # We simply keep collecting responses until timeout.
+            # Remove any 'break' conditions related to majority.
+            # This ensures we wait the entire timeout duration.
+
+        # After the full timeout, print whatever we received.
+        with self.lock:
+            responses = self.llm_responses.pop(context_id, [])
+
+        if responses:
+            print(f"LLM responses received for context {context_id}: {responses}")
+            present_responses_callback(context_id, responses)
+        else:
+            print(f"No responses received for context {context_id} within timeout.")
 
     def set_originator(self, context_id, originator_node_id):
         with self.lock:
