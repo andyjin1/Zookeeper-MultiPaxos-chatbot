@@ -84,6 +84,18 @@ class Network:
         except Exception as e:
             print(f"Error sending message to Network Server: {e}")
 
+    # Route status messages to the correct recipient
+    def send_message_prepare(self, recipient_id, message):
+        if message['type'] in ["STATUS_REQUEST", "STATUS_RESPONSE"]:
+            print(f"Routing {message['type']} to {recipient_id}.")
+        message['to'] = recipient_id
+        message['from'] = message['op_num']
+        data = json.dumps(message).encode() + b'\0'
+        try:
+            self.network_server_socket.sendall(data)
+        except Exception as e:
+            print(f"Error sending message to Network Server: {e}")
+
     def broadcast_message(self, message):
         for node_id in self.nodes_info:
             if node_id != self.node_id:

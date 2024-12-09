@@ -61,6 +61,8 @@ class Node:
             self.handle_ack(message)
         elif msg_type == 'STATUS_REQUEST':
             self.handle_status_request(message)
+        elif msg_type == 'STATUS_REQUEST_PREPARE':
+            self.handle_status_request_prepare(message)
         elif msg_type == 'STATUS_RESPONSE':
             self.handle_status_response(message)
         elif msg_type == 'STATUS_RESPONSE':
@@ -71,6 +73,28 @@ class Node:
             self.recover()
         else:
             print(f"Unknown message type received: {msg_type}")
+
+    # def handle_status_request_prepare(self, message):
+    #     sender = message['from']
+    #     sender_op_num = message['op_num']
+    #     sender_ballot_num = message.get('ballot_num', (0, self.node_id, 0))  # Default to a safe value if missing
+    #
+    #     print(
+    #         f"Received STATUS_REQUEST from {server_name(sender)} with op_num {sender_op_num} and ballot {format_ballot_num(sender_ballot_num)}.")
+    #
+    #     if sender_op_num < self.num_operations_applied:
+    #         print(f"Sending STATUS_RESPONSE to {server_name(sender)}.")
+    #         response = {
+    #             'type': 'STATUS_RESPONSE',
+    #             'from': self.node_id,
+    #             'to': sender,
+    #             'op_num': self.num_operations_applied,
+    #             'kv_store': self.kv_store,
+    #             'ballot_num': self.ballot_num,  # Include the current ballot number
+    #         }
+    #         self.network.send_message(sender, response)
+    #     else:
+    #         print(f"{server_name(sender)} is up-to-date or ahead. No STATUS_RESPONSE sent.")
 
     def handle_status_request(self, message):
         sender = message['from']

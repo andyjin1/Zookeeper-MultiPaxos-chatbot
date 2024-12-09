@@ -116,15 +116,15 @@ class Paxos:
         print(f"Received PREPARE {format_ballot_num(incoming_ballot)} from {server_name(sender)}")
 
         if self.num_operations_applied > incoming_op_num:
-            print(f"{server_name(self.node_id)} is behind. Sending STATUS_REQUEST to {server_name(self.leader)}.")
+            print(f"{server_name(pid_str)} is behind. Sending STATUS_REQUEST to {server_name(self.leader)}.")
             status_request = {
                 'type': 'STATUS_REQUEST',
-                'from': self.node_id,
+                'from': pid_str,
                 'to': self.leader,
-                'op_num': self.num_operations_applied,
+                'op_num': pid_str,
                 'ballot_num': self.ballot_num,  # Include the current ballot number
             }
-            self.network.send_message(self.leader, status_request)
+            self.network.send_message_prepare(self.leader, status_request)
             return
 
         if self.promised_ballot_num is None or incoming_ballot >= self.promised_ballot_num:
@@ -315,13 +315,14 @@ class Paxos:
             self.process_next_operation()
 
     def submit_operation(self, operation):
+        # Add the new operation
         if self.is_leader:
             print(f"Submitting operation as leader: {operation}")
             self.operation_queue.append(operation)
             if len(self.operation_queue) == 1:
                 self.process_next_operation()
         else:
-            # Forward the operation to the current leader
+            # Forward the operation to the leader
             if self.leader:
                 print(f"Forwarding operation to leader {server_name(self.leader)}: {operation}")
                 message = {
